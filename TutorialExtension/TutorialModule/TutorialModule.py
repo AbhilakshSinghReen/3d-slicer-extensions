@@ -1,13 +1,15 @@
 import logging
 import os
+from time import sleep
 
 import vtk
 
+import qt
 import slicer
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
 
-import numpy as np
+import requests
 
 
 #
@@ -138,8 +140,7 @@ class TutorialModuleWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         # Buttons
         self.ui.loadVolumeButton.connect('clicked(bool)', self.onLoadVolumeButtonClick)
-        self.ui.drawCircleButton.connect('clicked(bool)', self.onDrawCircleButtonClick)
-        self.ui.drawSquareButton.connect('clicked(bool)', self.onDrawSquareButtonClick)
+        self.ui.segmentWithTsButton.connect('clicked(bool)', self.onSegmentWithTsButtonClick)
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -301,23 +302,12 @@ class TutorialModuleWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         return position, size
     
-    def onDrawCircleButtonClick(self):
-        "Gets position and size, checks validity, and calls logic funtion for drawing circle segment on slice."
+    def onSegmentWithTsButtonClick(self):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
 
-        position, size = self.getPositionAndSize()
-        if position == False:
-            return
-        
-        self.logic.drawCircleSegmentOnSlice(position, size)
-    
-    def onDrawSquareButtonClick(self):
-        "Gets position and size, checks validity, and calls logic funtion for drawing square segment on slice."
+        self.logic.segmentWithTotalSegmentatorApi()
 
-        position, size = self.getPositionAndSize()
-        if position == False:
-            return
-        
-        self.logic.drawSquareSegmentOnSlice(position, size)
+        qt.QApplication.restoreOverrideCursor()
 
 
 #
@@ -344,6 +334,11 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
         self.volumeNode = None
         self.segmentationNode = None
         self.segmentEditorNode = None
+
+        self.baseUrl = "http://localhost:8000"
+        self.apiBaseUrl = "http://localhost:8000/api"
+        self.addSegmentationTaskEndpoint = f"{self.apiBaseUrl}/add-segmentation-task"
+        self.getSegmentationTaskResultEndpoint = self.apiBaseUrl + "/get-segmentation-task-result?task_id={{taskId}}"
     
     def setDefaultParameters(self, parameterNode):
         """
@@ -368,14 +363,9 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
     
     def getSegmentationNode(self):
         if self.segmentationNode is not None:
-            return
+            return self.segmentationNode
         
         self.segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-
-        self.proceduralSegmentId = "procedural_segment"
-        
-        segmentation = self.segmentationNode.GetSegmentation()
-        segmentation.AddEmptySegment(self.proceduralSegmentId, "Procedural", None)
 
         return self.segmentationNode
     
@@ -394,6 +384,7 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
             return
         
         self.volumeNode = slicer.util.loadVolume(volumePath)
+        self.loadedVolumePath = volumePath
         return self.volumeNode
 
     def getCurrentSliceIndices(self):
@@ -419,78 +410,85 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
             
         return sliceIndices
 
-    def drawCircleSegmentOnSlice(self, position, size):
-        sliceIndices = self.getCurrentSliceIndices()
-        if sliceIndices['axial'] == -1:
-            slicer.util.errorDisplay("Please load a volume first.")
+    def addSegmentationTask(self, volumePath):
+        with open(volumePath, "rb") as f:
+            files = {"file": f}
+            addResponse = requests.post(self.addSegmentationTaskEndpoint, files=files)
+        
+        if addResponse.status_code != 206:
+            return None
+        
+        addResponseData = addResponse.json()
+
+        taskId = addResponseData.get('result', {}).get('taskId', None)
+        return taskId
+    
+    def getSegmentationTaskUpdate(self, taskId):
+        getSegmentationTaskResultEndpoint = self.getSegmentationTaskResultEndpoint.replace("{{taskId}}", taskId)
+
+        getStatusReponse = requests.get(getSegmentationTaskResultEndpoint)
+        if getStatusReponse.status_code != 200:
+            return {
+                "status": "failed",
+            }
+        
+        getStatusReponseData = getStatusReponse.json()
+
+        return getStatusReponseData["result"]
+    
+    def loadSegmentationFromUrl(self, segmentationFileUrl):
+        loadedVolumeDir = os.path.dirname(self.loadedVolumePath)
+        segmentationSavePath = os.path.join(loadedVolumeDir, "segmentation.nii.gz")
+
+        getSegmentationResponse = requests.get(segmentationFileUrl)
+
+        if getSegmentationResponse.status_code != 200:
+            slicer.util.errorDisplay("Could not download segmentation file from server.")
             return
         
-        segmentArray = slicer.util.arrayFromSegmentBinaryLabelmap(
-            self.segmentationNode,
-            self.proceduralSegmentId,
-            self.volumeNode
-        )
+        with open(segmentationSavePath, "wb") as f:
+            f.write(getSegmentationResponse.content)
+        
+        if self.segmentationNode is not None:
+            segmentationNode = self.segmentationNode
 
-        slice2dArray = segmentArray[sliceIndices['axial']]
+            slicer.mrmlScene.RemoveNode(segmentationNode) # remove the segmentation node from the scene
 
-        # Draw Circle Logic
-        radius = size / 2
-        x_coords, y_coords = np.meshgrid(
-            np.arange(slice2dArray.shape[0]),
-            np.arange(slice2dArray.shape[1]),
-            indexing='ij'
-        )
-        distances = np.sqrt((x_coords - position[0])**2 + (y_coords - position[1])**2)
-        slice2dArray = np.where(distances <= radius, 1, slice2dArray)
-        ###
+            # Remove other related nodes
+            associated_nodes = slicer.util.getNodesByClass("vtkMRMLSegmentationDisplayNode")
+            for node in associated_nodes:
+                if node.GetSegmentationNode() == segmentationNode:
+                    slicer.mrmlScene.RemoveNode(node)
 
-        segmentArray[sliceIndices['axial']] = slice2dArray
+            # Check for remaining references to the segmentation node
+            remaining_references = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+            for node in remaining_references:
+                if node.GetAssociatedNodeID() == segmentationNode.GetID():
+                    slicer.mrmlScene.RemoveNode(node)
 
-        slicer.util.updateSegmentBinaryLabelmapFromArray(
-            segmentArray,
-            self.segmentationNode,
-            self.proceduralSegmentId,
-            self.volumeNode
-        )
+        self.segmentationNode = slicer.util.loadSegmentation(segmentationSavePath)
+        self.segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(self.volumeNode)
 
-    def drawSquareSegmentOnSlice(self, position, size):
-        sliceIndices = self.getCurrentSliceIndices()
-        if sliceIndices['axial'] == -1:
-            slicer.util.errorDisplay("Please load a volume first.")
+    def segmentWithTotalSegmentatorApi(self):
+        newTaskId = self.addSegmentationTask(self.loadedVolumePath)
+        if newTaskId == None:
+            print("Task add failed")
+            slicer.util.errorDisplay("Failed to add segmentation task to server.")
             return
         
-        segmentArray = slicer.util.arrayFromSegmentBinaryLabelmap(
-            self.segmentationNode,
-            self.proceduralSegmentId,
-            self.volumeNode
-        )
+        segmentationTaskUpdate = {
+            "status": "queued",
+        }
+        while segmentationTaskUpdate["status"] != "completed" and segmentationTaskUpdate["status"] != "failed":
+            segmentationTaskUpdate = self.getSegmentationTaskUpdate(newTaskId)
+            sleep(1)
 
-        slice2dArray = segmentArray[sliceIndices['axial']]
-
-        # Draw Square Logic
-        x_min = int(position[0] - size / 2)
-        x_max = int(position[0] + size / 2)
-        y_min = int(position[1] - size / 2)
-        y_max = int(position[1] + size / 2)
-
-        x_coords, y_coords = np.meshgrid(
-            np.arange(slice2dArray.shape[0]),
-            np.arange(slice2dArray.shape[1]),
-            indexing='ij'
-        )
-        isInside = (x_coords >= x_min) & (x_coords <= x_max) & (y_coords >= y_min) & (y_coords <= y_max)
+        if segmentationTaskUpdate["status"] == "failed":
+            slicer.util.errorDisplay("Server failed to segment the loaded volume.")
+            return
         
-        slice2dArray = np.where(isInside, 1, slice2dArray)
-        ###
-
-        segmentArray[sliceIndices['axial']] = slice2dArray
-
-        slicer.util.updateSegmentBinaryLabelmapFromArray(
-            segmentArray,
-            self.segmentationNode,
-            self.proceduralSegmentId,
-            self.volumeNode
-        )
+        segmentationFileUrl = segmentationTaskUpdate["segmentationFileUrl"]
+        self.loadSegmentationFromUrl(f"{self.baseUrl}/{segmentationFileUrl}")
 
 
 #
