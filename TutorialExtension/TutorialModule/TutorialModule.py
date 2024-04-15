@@ -7,6 +7,8 @@ import slicer
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
 
+import numpy as np
+
 
 #
 # TutorialModule
@@ -136,6 +138,8 @@ class TutorialModuleWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         # Buttons
         self.ui.loadVolumeButton.connect('clicked(bool)', self.onLoadVolumeButtonClick)
+        self.ui.drawCircleButton.connect('clicked(bool)', self.onDrawCircleButtonClick)
+        self.ui.drawSquareButton.connect('clicked(bool)', self.onDrawSquareButtonClick)
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -263,6 +267,58 @@ class TutorialModuleWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.embeddedSegmentEditorWidget.setSegmentationNode(segmentationNode)
         self.ui.embeddedSegmentEditorWidget.setSourceVolumeNode(volumeNode)
 
+    def getPositionAndSize(self):
+        "Validates and extracts position and size information from the 3 text boxes."
+
+        def isValidNonNegativeFloatStr(input_str):
+            if not input_str.replace(".", "").isnumeric():
+                return False
+            
+            input_num = float(input_str)
+
+            return input_num >= 0.0
+        
+        errors = []
+        
+        positionXStr = self.ui.shapePositionXTextBox.text
+        if not isValidNonNegativeFloatStr(positionXStr):
+            errors.append("Position X must be a valid non-negative number.")
+        
+        positionYStr = self.ui.shapePositionYTextBox.text
+        if not isValidNonNegativeFloatStr(positionYStr):
+            errors.append("Position Y must be a valid non-negative number.")
+        
+        sizeStr = self.ui.shapeSizeTextBox.text
+        if not isValidNonNegativeFloatStr(sizeStr):
+            errors.append("Size must be a valid non-negative number.")
+
+        if len(errors) > 0:
+            slicer.util.errorDisplay("\n".join(errors))
+            return False, False
+
+        position = (float(positionXStr), float(positionYStr))
+        size = float(sizeStr)
+
+        return position, size
+    
+    def onDrawCircleButtonClick(self):
+        "Gets position and size, checks validity, and calls logic funtion for drawing circle segment on slice."
+
+        position, size = self.getPositionAndSize()
+        if position == False:
+            return
+        
+        self.logic.drawCircleSegmentOnSlice(position, size)
+    
+    def onDrawSquareButtonClick(self):
+        "Gets position and size, checks validity, and calls logic funtion for drawing square segment on slice."
+
+        position, size = self.getPositionAndSize()
+        if position == False:
+            return
+        
+        self.logic.drawSquareSegmentOnSlice(position, size)
+
 
 #
 # TutorialModuleLogic
@@ -288,6 +344,15 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
         self.volumeNode = None
         self.segmentationNode = None
         self.segmentEditorNode = None
+    
+    def setDefaultParameters(self, parameterNode):
+        """
+        Initialize parameter node with default settings.
+        """
+        if not parameterNode.GetParameter("Threshold"):
+            parameterNode.SetParameter("Threshold", "100.0")
+        if not parameterNode.GetParameter("Invert"):
+            parameterNode.SetParameter("Invert", "false")
 
     def getSegmentEditorNode(self):
         segmentEditorSingletonTag = "SegmentEditor"
@@ -306,6 +371,12 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
             return
         
         self.segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+
+        self.proceduralSegmentId = "procedural_segment"
+        
+        segmentation = self.segmentationNode.GetSegmentation()
+        segmentation.AddEmptySegment(self.proceduralSegmentId, "Procedural", None)
+
         return self.segmentationNode
     
     def loadVolume(self, volumePath):
@@ -324,6 +395,102 @@ class TutorialModuleLogic(ScriptedLoadableModuleLogic):
         
         self.volumeNode = slicer.util.loadVolume(volumePath)
         return self.volumeNode
+
+    def getCurrentSliceIndices(self):
+        "Get the current slice indices for Axial, Coronal, and Sagittal."
+
+        if self.volumeNode is None:
+            return {
+                'axial': -1,
+                'coronal': -1,
+                'sagittal': -1,
+            }
+        
+        sliceIndices = {}
+        
+        for viewName, planeName in zip(["Red", "Green", "Yellow"], ["axial", "coronal", "sagittal"]):
+            sliceWidget = slicer.app.layoutManager().sliceWidget(viewName)
+            sliceLogic = sliceWidget.sliceLogic()
+
+            sliceOffset = sliceLogic.GetSliceOffset()
+            sliceIndex = sliceLogic.GetSliceIndexFromOffset(sliceOffset) - 1
+
+            sliceIndices[planeName] = sliceIndex
+            
+        return sliceIndices
+
+    def drawCircleSegmentOnSlice(self, position, size):
+        sliceIndices = self.getCurrentSliceIndices()
+        if sliceIndices['axial'] == -1:
+            slicer.util.errorDisplay("Please load a volume first.")
+            return
+        
+        segmentArray = slicer.util.arrayFromSegmentBinaryLabelmap(
+            self.segmentationNode,
+            self.proceduralSegmentId,
+            self.volumeNode
+        )
+
+        slice2dArray = segmentArray[sliceIndices['axial']]
+
+        # Draw Circle Logic
+        radius = size / 2
+        x_coords, y_coords = np.meshgrid(
+            np.arange(slice2dArray.shape[0]),
+            np.arange(slice2dArray.shape[1]),
+            indexing='ij'
+        )
+        distances = np.sqrt((x_coords - position[0])**2 + (y_coords - position[1])**2)
+        slice2dArray = np.where(distances <= radius, 1, slice2dArray)
+        ###
+
+        segmentArray[sliceIndices['axial']] = slice2dArray
+
+        slicer.util.updateSegmentBinaryLabelmapFromArray(
+            segmentArray,
+            self.segmentationNode,
+            self.proceduralSegmentId,
+            self.volumeNode
+        )
+
+    def drawSquareSegmentOnSlice(self, position, size):
+        sliceIndices = self.getCurrentSliceIndices()
+        if sliceIndices['axial'] == -1:
+            slicer.util.errorDisplay("Please load a volume first.")
+            return
+        
+        segmentArray = slicer.util.arrayFromSegmentBinaryLabelmap(
+            self.segmentationNode,
+            self.proceduralSegmentId,
+            self.volumeNode
+        )
+
+        slice2dArray = segmentArray[sliceIndices['axial']]
+
+        # Draw Square Logic
+        x_min = int(position[0] - size / 2)
+        x_max = int(position[0] + size / 2)
+        y_min = int(position[1] - size / 2)
+        y_max = int(position[1] + size / 2)
+
+        x_coords, y_coords = np.meshgrid(
+            np.arange(slice2dArray.shape[0]),
+            np.arange(slice2dArray.shape[1]),
+            indexing='ij'
+        )
+        isInside = (x_coords >= x_min) & (x_coords <= x_max) & (y_coords >= y_min) & (y_coords <= y_max)
+        
+        slice2dArray = np.where(isInside, 1, slice2dArray)
+        ###
+
+        segmentArray[sliceIndices['axial']] = slice2dArray
+
+        slicer.util.updateSegmentBinaryLabelmapFromArray(
+            segmentArray,
+            self.segmentationNode,
+            self.proceduralSegmentId,
+            self.volumeNode
+        )
 
 
 #

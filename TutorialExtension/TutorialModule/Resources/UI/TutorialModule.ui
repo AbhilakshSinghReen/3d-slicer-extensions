@@ -10,10 +10,12 @@
     <height>338</height>
    </rect>
   </property>
+  
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
     <widget class="QLineEdit" name="volumePathTextBox"/>
    </item>
+   
    <item>
     <widget class="QPushButton" name="loadVolumeButton">
      <property name="text">
@@ -21,6 +23,51 @@
      </property>
     </widget>
    </item>
+
+    <item>
+     <layout class="QHBoxLayout" name="serverConfigQHBoxLayout">
+     <item>
+      <widget class="QLineEdit" name="shapePositionXTextBox">
+       <property name="placeholderText">
+        <string>Position X</string>
+       </property>
+      </widget>
+     </item>
+
+     <item>
+      <widget class="QLineEdit" name="shapePositionYTextBox">
+       <property name="placeholderText">
+        <string>Position Y</string>
+       </property>
+      </widget>
+     </item>
+
+     <item>
+      <widget class="QLineEdit" name="shapeSizeTextBox">
+       <property name="placeholderText">
+        <string>Size</string>
+       </property>
+      </widget>
+     </item>
+
+     <item>
+      <widget class="QPushButton" name="drawCircleButton">
+       <property name="text">
+       <string>Circle</string>
+      </property>
+      </widget>
+     </item>
+
+     <item>
+      <widget class="QPushButton" name="drawSquareButton">
+       <property name="text">
+       <string>Square</string>
+      </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+
    <item>
     <widget class="qMRMLSegmentEditorWidget" name="embeddedSegmentEditorWidget">
      <property name="autoShowSourceVolumeNode">
